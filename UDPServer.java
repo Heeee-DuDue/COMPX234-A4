@@ -156,3 +156,76 @@ public class UDPServer {
     }
 }
 
+// Client: Downloads files sequentially
+public class UDPClient {
+    private static final int MAX_RETRIES = 5;
+    private static final int BASE_TIMEOUT = 500;
+
+    public static void main(String[] args) throws IOException {
+        if (args.length != 3) {
+            System.out.println("Usage: java UDPClient <host> <port> <filelist>");
+            return;
+        }
+        
+        String host = args[0];
+        int port = Integer.parseInt(args[1]);
+        List<String> files = Files.readAllLines(Paths.get(args[2]));
+        
+        try (DatagramSocket socket = new DatagramSocket()) {
+            InetAddress address = InetAddress.getByName(host);
+            
+            for (String filename : files) {
+                downloadFile(socket, address, port, filename.trim());
+            }
+        }
+    }
+
+    private static void downloadFile(DatagramSocket socket, InetAddress address, 
+                                   int port, String filename) throws IOException {
+        // Step 1: Send DOWNLOAD request
+        // 步骤1：发送下载请求
+        String request = "DOWNLOAD " + filename;
+        String response = sendWithRetry(socket, address, port, request, "OK", "ERR");
+        
+        if (response.startsWith("ERR")) {
+            System.out.println("Error: " + response);
+            return;
+        }
+        
+        // Parse server response
+        // 解析服务器响应
+        String[] parts = response.split(" ");
+        long fileSize = Long.parseLong(parts[4]);
+        int filePort = Integer.parseInt(parts[6]);
+        
+        System.out.print("Downloading " + filename + " (" + fileSize + " bytes): ");
+        
+        // Step 2: Download file content
+        // 步骤2：下载文件内容
+        try (FileOutputStream fos = new FileOutputStream(filename)) {
+            long bytesReceived = 0;
+            while (bytesReceived < fileSize) {
+                long end = Math.min(bytesReceived + UDPServer.MAX_BLOCK_SIZE - 1, fileSize - 1);
+                String dataReq = "FILE " + filename + " GET START " + bytesReceived + " END " + end;
+                
+                String dataRes = sendWithRetry(socket, address, filePort, dataReq, "FILE " + filename + " OK", null);
+                
+                // Extract and decode data
+                // 提取并解码数据
+                String[] resParts = dataRes.split(" DATA ", 2);
+                byte[] block = Base64.getDecoder().decode(resParts[1]);
+                fos.write(block);
+                bytesReceived += block.length;
+                
+                // Show progress
+                // 显示进度
+                System.out.print("*");
+            }
+            System.out.println("\nDownload complete: " + filename);
+            
+            // Step 3: Send CLOSE
+            // 步骤3：发送关闭请求
+            String closeReq = "FILE " + filename + " CLOSE";
+            sendWithRetry(socket, address, filePort, closeReq, "FILE " + filename + " CLOSE_OK", null);
+        }
+    }
