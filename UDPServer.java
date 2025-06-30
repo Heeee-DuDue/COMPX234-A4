@@ -4,36 +4,155 @@ import java.util.*;
 import java.util.concurrent.*; 
 import java.util.Base64; 
 
+// Server: Handles multiple clients using threads
 public class UDPServer {
     private static final int MIN_PORT = 50000;
     private static final int MAX_PORT = 51000;
     private static final int MAX_RETRIES = 5;
-    private static final int BLOCK_SIZE = 1000;
+    private static final int BASE_TIMEOUT = 500;
+    private static final int MAX_BLOCK_SIZE = 1000;
+    private static ExecutorService threadPool = Executors.newCachedThreadPool();
 
-    private DatagramSocket serverSocket;
-    private ExecutorService threadPool;
-    private Set <Integer> usedPorts = ConcurrentHashMap.newKeySet();
-
-    public UDPServer(int port) throws SocketException {
-        serverSocket = new DatagramSocket(port);
-        threadPool = Executors.newCachedThreadPool();
-        System.out.println("Server started on port " + port);
-    }
-punlic void start() {
-    while (true) {
-        try {
+    public static void main(String[] args) throws IOException {
+        if (args.length != 1) {
+            System.out.println("Usage: java UDPServer <port>");
+            return;
+        }
+        int port = Integer.parseInt(args[0]);
+        try (DatagramSocket mainSocket = new DatagramSocket(port)) {
+            System.out.println("Server started on port " + port);
             byte[] buffer = new byte[1024];
-            DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-            serverSocket.receive(packet);
-
-            String request = new String(packet.getData(), 0, packet.getLength());
-            if (request.startsWith("DOWNLOAD")) {
-                threadPool.execute(new ClientHandler(request, packet.getAddress(), packet.getPort()));
+            
+            while (true) {
+                DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+                mainSocket.receive(packet);
+                threadPool.execute(new FileHandler(mainSocket, packet));
             }
-        } catch (IOException e) {
-            System.err.println ("Server error: " + e.getMessage());
+        }
+    }
+   // File transfer handler (per client)
+    static class FileHandler implements Runnable {
+        private final DatagramSocket mainSocket;
+        private final DatagramPacket initPacket;
+
+        public FileHandler(DatagramSocket mainSocket, DatagramPacket packet) {
+            this.mainSocket = mainSocket;
+            this.initPacket = packet;
+        }
+        
+        @Override
+        public void run() {
+            try {
+                // Parse DOWNLOAD request
+                // 解析下载请求
+                String request = new String(initPacket.getData(), 0, initPacket.getLength());
+                if (!request.startsWith("DOWNLOAD ")) return;
+                
+                String filename = request.substring(9).trim();
+                File file = new File(filename);
+                
+                // Check if file exists
+                // 检查文件是否存在
+                if (!file.exists()) {
+                    sendResponse("ERR " + filename + " NOT_FOUND");
+                    return;
+                }
+                
+                // Select random port for file transfer
+                // 随机选择文件传输端口
+                int filePort = selectAvailablePort();
+                if (filePort == -1) {
+                    sendResponse("ERR " + filename + " NO_PORT_AVAILABLE");
+                    return;
+                }
+                
+                // Send OK response with file info
+                // 发送包含文件信息的OK响应
+                long fileSize = file.length();
+                String response = "OK " + filename + " SIZE " + fileSize + " PORT " + filePort;
+                sendResponse(response);
+                
+                // Start file transfer on new port
+                // 在新端口开始文件传输
+                startFileTransfer(file, filePort);
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+
+        private void sendResponse(String message) throws IOException {
+            byte[] data = message.getBytes();
+            DatagramPacket packet = new DatagramPacket(
+                data, data.length, 
+                initPacket.getAddress(), initPacket.getPort()
+            );
+            mainSocket.send(packet);
+        }
+
+        private int selectAvailablePort() {
+            Random rand = new Random();
+            for (int i = 0; i < 10; i++) {
+                int port = MIN_PORT + rand.nextInt(MAX_PORT - MIN_PORT);
+                try (DatagramSocket test = new DatagramSocket(port)) {
+                    return port;
+                } catch (IOException ignored) {}
+            }
+            return -1;
+        }
+
+        private void startFileTransfer(File file, int port) throws IOException {
+            try (DatagramSocket fileSocket = new DatagramSocket(port);
+                 FileInputStream fis = new FileInputStream(file)) {
+                System.out.println("File transfer started on port " + port);
+                
+                byte[] buffer = new byte[1024];
+                while (true) {
+                    DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+                    fileSocket.receive(packet);
+                    
+                    String request = new String(packet.getData(), 0, packet.getLength());
+                    String[] parts = request.split(" ");
+                    
+                    // Handle CLOSE request
+                    // 处理关闭请求
+                    if (request.startsWith("FILE ") && parts.length > 2 && "CLOSE".equals(parts[2])) {
+                        sendFileResponse(fileSocket, packet, "FILE " + parts[1] + " CLOSE_OK");
+                        break;
+                    }
+                    
+                    // Handle data request
+                    // 处理数据请求
+                    if (request.startsWith("FILE ") && "GET".equals(parts[2])) {
+                        long start = Long.parseLong(parts[4]);
+                        long end = Long.parseLong(parts[6]);
+                        int blockSize = (int) (end - start + 1);
+                        
+                        byte[] block = new byte[blockSize];
+                        fis.getChannel().position(start);
+                        int read = fis.read(block);
+                        
+                        if (read > 0) {
+                            String encoded = Base64.getEncoder().encodeToString(
+                                Arrays.copyOf(block, read)
+                            );
+                            String response = "FILE " + parts[1] + " OK START " + 
+                                start + " END " + (start + read - 1) + " DATA " + encoded;
+                            sendFileResponse(fileSocket, packet, response);
+                        }
+                    }
+                }
+            }
+        }
+
+        private void sendFileResponse(DatagramSocket socket, DatagramPacket request, String message) 
+            throws IOException {
+            byte[] data = message.getBytes();
+            DatagramPacket response = new DatagramPacket(
+                data, data.length, 
+                request.getAddress(), request.getPort()
+            );
+            socket.send(response);
         }
     }
 }
-
 
