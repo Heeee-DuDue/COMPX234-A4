@@ -44,7 +44,6 @@ public class UDPServer {
         public void run() {
             try {
                 // Parse DOWNLOAD request
-                // 解析下载请求
                 String request = new String(initPacket.getData(), 0, initPacket.getLength());
                 if (!request.startsWith("DOWNLOAD ")) return;
                 
@@ -52,14 +51,12 @@ public class UDPServer {
                 File file = new File(filename);
                 
                 // Check if file exists
-                // 检查文件是否存在
                 if (!file.exists()) {
                     sendResponse("ERR " + filename + " NOT_FOUND");
                     return;
                 }
                 
                 // Select random port for file transfer
-                // 随机选择文件传输端口
                 int filePort = selectAvailablePort();
                 if (filePort == -1) {
                     sendResponse("ERR " + filename + " NO_PORT_AVAILABLE");
@@ -67,13 +64,11 @@ public class UDPServer {
                 }
                 
                 // Send OK response with file info
-                // 发送包含文件信息的OK响应
                 long fileSize = file.length();
                 String response = "OK " + filename + " SIZE " + fileSize + " PORT " + filePort;
                 sendResponse(response);
                 
                 // Start file transfer on new port
-                // 在新端口开始文件传输
                 startFileTransfer(file, filePort);
             } catch (Exception e) {
                 e.printStackTrace();
@@ -114,14 +109,12 @@ public class UDPServer {
                     String[] parts = request.split(" ");
                     
                     // Handle CLOSE request
-                    // 处理关闭请求
                     if (request.startsWith("FILE ") && parts.length > 2 && "CLOSE".equals(parts[2])) {
                         sendFileResponse(fileSocket, packet, "FILE " + parts[1] + " CLOSE_OK");
                         break;
                     }
                     
-                    // Handle data request
-                    // 处理数据请求
+                    // Handle data reques
                     if (request.startsWith("FILE ") && "GET".equals(parts[2])) {
                         long start = Long.parseLong(parts[4]);
                         long end = Long.parseLong(parts[6]);
@@ -183,7 +176,6 @@ public class UDPClient {
     private static void downloadFile(DatagramSocket socket, InetAddress address, 
                                    int port, String filename) throws IOException {
         // Step 1: Send DOWNLOAD request
-        // 步骤1：发送下载请求
         String request = "DOWNLOAD " + filename;
         String response = sendWithRetry(socket, address, port, request, "OK", "ERR");
         
@@ -193,7 +185,6 @@ public class UDPClient {
         }
         
         // Parse server response
-        // 解析服务器响应
         String[] parts = response.split(" ");
         long fileSize = Long.parseLong(parts[4]);
         int filePort = Integer.parseInt(parts[6]);
@@ -201,7 +192,6 @@ public class UDPClient {
         System.out.print("Downloading " + filename + " (" + fileSize + " bytes): ");
         
         // Step 2: Download file content
-        // 步骤2：下载文件内容
         try (FileOutputStream fos = new FileOutputStream(filename)) {
             long bytesReceived = 0;
             while (bytesReceived < fileSize) {
@@ -211,21 +201,50 @@ public class UDPClient {
                 String dataRes = sendWithRetry(socket, address, filePort, dataReq, "FILE " + filename + " OK", null);
                 
                 // Extract and decode data
-                // 提取并解码数据
                 String[] resParts = dataRes.split(" DATA ", 2);
                 byte[] block = Base64.getDecoder().decode(resParts[1]);
                 fos.write(block);
                 bytesReceived += block.length;
                 
                 // Show progress
-                // 显示进度
                 System.out.print("*");
             }
             System.out.println("\nDownload complete: " + filename);
             
             // Step 3: Send CLOSE
-            // 步骤3：发送关闭请求
             String closeReq = "FILE " + filename + " CLOSE";
             sendWithRetry(socket, address, filePort, closeReq, "FILE " + filename + " CLOSE_OK", null);
         }
     }
+    // Reliable send with retry mechanism
+    private static String sendWithRetry(DatagramSocket socket, InetAddress address, 
+                                      int port, String request, String successPrefix, String errorPrefix) 
+        throws IOException {
+        byte[] buffer = new byte[2048];
+        DatagramPacket packet = new DatagramPacket(
+            request.getBytes(), request.getBytes().length, 
+            address, port
+        );
+        
+        int timeout = BASE_TIMEOUT;
+        for (int i = 0; i <= MAX_RETRIES; i++) {
+            try {
+                socket.send(packet);
+                socket.setSoTimeout(timeout);
+                
+                DatagramPacket response = new DatagramPacket(buffer, buffer.length);
+                socket.receive(response);
+                
+                String res = new String(response.getData(), 0, response.getLength());
+                if ((successPrefix != null && res.startsWith(successPrefix)) ||
+                    (errorPrefix != null && res.startsWith(errorPrefix))) {
+                    return res;
+                }
+            } catch (SocketTimeoutException e) {
+                timeout *= 2;  // Exponential backoff
+                System.out.println("Timeout, retrying: " + request);
+            }
+        }
+        throw new IOException("Max retries exceeded for: " + request);
+    }
+}
